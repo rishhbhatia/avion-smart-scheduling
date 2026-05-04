@@ -42,3 +42,57 @@ export interface AuditEntry {
   rationale: string;
   humanName: string;
 }
+
+export interface OrderConfidence {
+  modelEstimateDate: string;
+  uncertaintyDays: number;
+  confidencePercent: number;
+  bottleneckOperation: {
+    name: string;
+    machine: string;
+    historicalSlipRate: number;
+    queueDepth: number;
+  };
+  riskFactors: Array<{
+    description: string;
+    severity: "low" | "medium" | "high";
+  }>;
+  confidenceBreakdown: {
+    scheduleData: "high" | "medium" | "low";
+    vendorEtas: "high" | "medium" | "low";
+    inspectorCapacity: "high" | "medium" | "low";
+    customerFlexibility: "high" | "medium" | "low" | "unknown";
+  };
+  recommendation: string;
+}
+
+export interface AgentAction {
+  id: string;
+  timestamp: string;
+  type:
+    | "reroute"
+    | "schedule_update"
+    | "disruption_response"
+    | "confidence_recalc"
+    | "recommendation"
+    | "flag";
+  status: "pending" | "approved" | "overridden" | "auto_applied";
+  title: string;
+  affectedOrder?: string;
+  affectedOperation?: string;
+  trigger: string;
+  reasoning: string[];
+  alternatives: Array<{
+    description: string;
+    deliveryImpactDays: number;
+    costImpactDollars: number;
+    picked: boolean;
+  }>;
+  dataSources: string[];
+  decision?: {
+    by: string;
+    at: string;
+    action: "approved" | "overridden";
+    reason?: string;
+  };
+}

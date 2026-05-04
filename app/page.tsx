@@ -1,10 +1,17 @@
 "use client";
 
 import { useState, useCallback, useMemo } from "react";
-import { orders, currentUser, aiKnowledge } from "@/lib/seed";
+import {
+  orders,
+  currentUser,
+  aiKnowledge,
+  orderConfidenceData,
+  seedActivityLog,
+  disruptionConfidenceEffects,
+} from "@/lib/seed";
 import { disruptions } from "@/lib/disruptions";
 import { proposeSchedule } from "@/lib/mock-planner";
-import { Disruption, Proposal, AuditEntry } from "@/lib/types";
+import { Disruption, Proposal, AuditEntry, OrderConfidence, AgentAction } from "@/lib/types";
 import {
   machines,
   getPartSummaries,
@@ -327,10 +334,171 @@ function GanttChart({
   );
 }
 
+// ── Helper functions ──
+
+function demoTimestamp(): string {
+  const now = new Date();
+  return new Date(
+    `2026-11-04T${String(now.getUTCHours()).padStart(2, "0")}:${String(now.getUTCMinutes()).padStart(2, "0")}:${String(now.getUTCSeconds()).padStart(2, "0")}.000Z`
+  ).toISOString();
+}
+
+function formatActivityTime(iso: string): string {
+  const d = new Date(iso);
+  return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+}
+
+function getActivityDayLabel(iso: string): string {
+  const dateStr = iso.substring(0, 10);
+  if (dateStr === "2026-11-04") return "Today";
+  if (dateStr === "2026-11-03") return "Yesterday";
+  const d = new Date(dateStr + "T00:00:00");
+  return d.toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function groupActivityByDay(
+  log: AgentAction[]
+): { day: string; entries: AgentAction[] }[] {
+  const sorted = [...log].sort((a, b) =>
+    b.timestamp.localeCompare(a.timestamp)
+  );
+  const map = new Map<string, AgentAction[]>();
+  for (const entry of sorted) {
+    const day = getActivityDayLabel(entry.timestamp);
+    if (!map.has(day)) map.set(day, []);
+    map.get(day)!.push(entry);
+  }
+  return Array.from(map.entries()).map(([day, entries]) => ({ day, entries }));
+}
+
+// ── ActivityStatusPill ──
+
+function ActivityStatusPill({ status }: { status: AgentAction["status"] }) {
+  const styles: Record<AgentAction["status"], string> = {
+    pending: "bg-amber-100 text-amber-800",
+    approved: "bg-emerald-100 text-emerald-800",
+    overridden: "bg-gray-100 text-gray-600",
+    auto_applied: "bg-blue-100 text-blue-800",
+  };
+  const labels: Record<AgentAction["status"], string> = {
+    pending: "PENDING",
+    approved: "APPROVED ✓",
+    overridden: "OVERRIDDEN",
+    auto_applied: "AUTO-APPLIED",
+  };
+  return (
+    <span
+      className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded shrink-0 ${styles[status]}`}
+    >
+      {labels[status]}
+    </span>
+  );
+}
+
+// ── WhyEstimatePanel ──
+
+function WhyEstimatePanel({ confidence }: { confidence: OrderConfidence }) {
+  const dotColors: Record<string, string> = {
+    high: "text-emerald-600",
+    medium: "text-amber-600",
+    low: "text-red-600",
+    unknown: "text-gray-400",
+  };
+  const breakdownLabels: Record<string, string> = {
+    scheduleData: "Schedule data",
+    vendorEtas: "Vendor ETAs",
+    inspectorCapacity: "Inspector capacity",
+    customerFlexibility: "Customer flexibility",
+  };
+  return (
+    <div className="mt-4 pt-4 border-t border-gray-100">
+      <div className="flex items-center gap-2 mb-3">
+        <h4 className="text-xs font-bold uppercase tracking-wider text-gray-500">
+          Why this estimate
+        </h4>
+        <Badge type="ai" />
+      </div>
+
+      <div className="mb-3">
+        <p className="text-xs font-semibold text-gray-700">
+          Bottleneck operation: {confidence.bottleneckOperation.name} on{" "}
+          <span className="font-mono">{confidence.bottleneckOperation.machine}</span>
+        </p>
+        <ul className="mt-1 space-y-0.5 text-xs text-gray-500 ml-3">
+          <li>
+            Historical slip rate on this op + machine:{" "}
+            {(confidence.bottleneckOperation.historicalSlipRate * 100).toFixed(
+              0
+            )}
+            % over last 12 months
+          </li>
+          <li>
+            Current{" "}
+            <span className="font-mono">
+              {confidence.bottleneckOperation.machine}
+            </span>{" "}
+            queue: {confidence.bottleneckOperation.queueDepth} jobs ahead
+          </li>
+        </ul>
+      </div>
+
+      {confidence.riskFactors.length > 0 && (
+        <div className="mb-3">
+          <p className="text-xs font-semibold text-gray-700 mb-1">
+            Risk factors detected:
+          </p>
+          <ul className="space-y-0.5">
+            {confidence.riskFactors.map((rf, i) => (
+              <li key={i} className="text-xs text-gray-600 flex gap-1.5">
+                <span className="text-gray-400 shrink-0">•</span>
+                <span className="flex-1">{rf.description}</span>
+                <span
+                  className={`shrink-0 text-[9px] font-bold uppercase ${rf.severity === "high" ? "text-red-500" : rf.severity === "medium" ? "text-amber-500" : "text-gray-400"}`}
+                >
+                  {rf.severity}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <div className="mb-3">
+        <p className="text-xs font-semibold text-gray-700 mb-1.5">
+          Confidence breakdown:
+        </p>
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+          {Object.entries(confidence.confidenceBreakdown).map(([key, val]) => (
+            <div key={key} className="flex justify-between text-xs">
+              <span className="text-gray-500">
+                {breakdownLabels[key] ?? key}
+              </span>
+              <span className={`font-medium ${dotColors[val] ?? "text-gray-500"}`}>
+                {val}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="bg-blue-50 rounded-lg p-2.5">
+        <p className="text-xs text-blue-800">
+          <span className="font-semibold">Recommendation: </span>
+          {confidence.recommendation}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // ── Main ──
 
 export default function Home() {
-  const [viewMode, setViewMode] = useState<"orders" | "machines">("orders");
+  const [viewMode, setViewMode] = useState<"orders" | "machines" | "activity">("orders");
   const [selectedOrderId, setSelectedOrderId] = useState(orders[0].id);
   const [selectedMachineId, setSelectedMachineId] = useState(machines[0].id);
   const [showDisruptionPicker, setShowDisruptionPicker] = useState(false);
@@ -354,9 +522,38 @@ export default function Home() {
   const [cascadeResult, setCascadeResult] = useState<CascadeResult | null>(
     null
   );
+  const [activityLog, setActivityLog] = useState<AgentAction[]>(seedActivityLog);
+  const [selectedActivityId, setSelectedActivityId] = useState<string>(
+    seedActivityLog[0].id
+  );
+  const [confidenceOverrides, setConfidenceOverrides] = useState<
+    Record<string, Partial<OrderConfidence>>
+  >({});
+  const [animatingOrders, setAnimatingOrders] = useState<Set<string>>(
+    new Set()
+  );
+  const [whyExpanded, setWhyExpanded] = useState(false);
+  const [overrideReason, setOverrideReason] = useState("");
+  const [showActivityOverride, setShowActivityOverride] = useState(false);
+  const [hasNewActivity, setHasNewActivity] = useState(false);
 
   const selectedOrder = orders.find((o) => o.id === selectedOrderId)!;
   const selectedMachine = machines.find((m) => m.id === selectedMachineId)!;
+
+  const selectedConf: OrderConfidence = {
+    ...orderConfidenceData[selectedOrder.id],
+    ...confidenceOverrides[selectedOrder.id],
+  } as OrderConfidence;
+  const confLateDays = selectedConf?.modelEstimateDate
+    ? Math.round(
+        (new Date(selectedConf.modelEstimateDate + "T00:00:00").getTime() -
+          new Date(selectedOrder.promisedDate + "T00:00:00").getTime()) /
+          86400000
+      )
+    : 0;
+
+  const selectedActivity =
+    activityLog.find((a) => a.id === selectedActivityId) ?? activityLog[0];
 
   const machineUtil = useMemo(
     () => getMachineUtilization(selectedMachine),
@@ -379,6 +576,50 @@ export default function Home() {
       setActionMode(null);
       setRationale("");
       setIsThinking(true);
+
+      // Update confidence for all orders affected by this disruption type
+      const effects = disruptionConfidenceEffects[disruption.id] ?? {};
+      const affectedIds = Object.keys(effects);
+      if (affectedIds.length > 0) {
+        setConfidenceOverrides((prev) => {
+          const next = { ...prev };
+          for (const [ordId, effect] of Object.entries(effects)) {
+            next[ordId] = { ...(prev[ordId] ?? {}), ...effect };
+          }
+          return next;
+        });
+        setAnimatingOrders(new Set(affectedIds));
+        setTimeout(() => setAnimatingOrders(new Set()), 2200);
+      }
+
+      // Add an activity log entry for the confidence recalculation
+      const reasoningLines: string[] = [
+        `${disruption.label} detected. Evaluating confidence impact on active orders.`,
+        ...affectedIds.map((id) => {
+          const eff = effects[id];
+          return `${id}: confidence updated to ${eff.confidencePercent}%, model estimate now ${eff.modelEstimateDate}.`;
+        }),
+        affectedIds.length > 0
+          ? "Recalculation applied automatically. Planner review recommended for orders below 60%."
+          : "No active orders have a confidence dependency on this disruption type.",
+      ];
+      const newEntry: AgentAction = {
+        id: `act-${Date.now()}`,
+        timestamp: demoTimestamp(),
+        type: "confidence_recalc",
+        status: "auto_applied",
+        title: `Confidence recalculated after disruption: ${disruption.label}`,
+        trigger: `Disruption injected: ${disruption.detail}`,
+        reasoning: reasoningLines,
+        alternatives: [],
+        dataSources: [
+          "ERP machine schedule (live)",
+          "Historical slip-rate database (12mo)",
+          "Machine disruption log",
+        ],
+      };
+      setActivityLog((prev) => [newEntry, ...prev]);
+      setHasNewActivity(true);
 
       try {
         const res = await fetch("/api/propose", {
@@ -435,11 +676,42 @@ export default function Home() {
         humanName: currentUser.name,
       };
       setAuditLog((prev) => [entry, ...prev]);
+
+      // Wire Feature 1 → Feature 2: planner decisions generate activity log entries
+      if (action === "accept" || action === "override") {
+        const actEntry: AgentAction = {
+          id: `act-${Date.now()}`,
+          timestamp: demoTimestamp(),
+          type: "disruption_response",
+          status: action === "accept" ? "approved" : "overridden",
+          title: `${action === "accept" ? "Proposal accepted" : "Proposal overridden"}: ${selectedOrder.id} schedule update`,
+          affectedOrder: selectedOrder.id,
+          trigger: activeDisruption
+            ? `Planner decision on AI proposal following disruption: ${activeDisruption.label}`
+            : "Planner manual schedule decision",
+          reasoning: proposal.reasoning,
+          alternatives: [],
+          dataSources: [
+            "ERP machine schedule (live)",
+            "AI schedule proposal",
+            `Customer contract terms (${selectedOrder.id})`,
+          ],
+          decision: {
+            by: currentUser.name,
+            at: demoTimestamp(),
+            action: action === "accept" ? "approved" : "overridden",
+            reason: action === "override" ? rationale : undefined,
+          },
+        };
+        setActivityLog((prev) => [actEntry, ...prev]);
+        setHasNewActivity(true);
+      }
+
       setActionMode(null);
       setRationale("");
       setOverrideDate("");
     },
-    [proposal, selectedOrder.id, rationale, overrideDate]
+    [proposal, selectedOrder.id, rationale, overrideDate, activeDisruption]
   );
 
   const resetDemo = () => {
@@ -455,7 +727,61 @@ export default function Home() {
     setExpandedJobPn(null);
     setActiveMachineDisruption(null);
     setCascadeResult(null);
+    setActivityLog(
+      seedActivityLog.map((e) =>
+        e.status === "pending" ? e : e
+      )
+    );
+    setSelectedActivityId(seedActivityLog[0].id);
+    setConfidenceOverrides({});
+    setAnimatingOrders(new Set());
+    setWhyExpanded(false);
+    setOverrideReason("");
+    setShowActivityOverride(false);
+    setHasNewActivity(false);
   };
+
+  const handleActivityApprove = useCallback((id: string) => {
+    setActivityLog((prev) =>
+      prev.map((e) =>
+        e.id === id
+          ? {
+              ...e,
+              status: "approved" as const,
+              decision: {
+                by: currentUser.name,
+                at: demoTimestamp(),
+                action: "approved" as const,
+              },
+            }
+          : e
+      )
+    );
+  }, []);
+
+  const handleActivityOverride = useCallback(
+    (id: string, reason: string) => {
+      setActivityLog((prev) =>
+        prev.map((e) =>
+          e.id === id
+            ? {
+                ...e,
+                status: "overridden" as const,
+                decision: {
+                  by: currentUser.name,
+                  at: demoTimestamp(),
+                  action: "overridden" as const,
+                  reason,
+                },
+              }
+            : e
+        )
+      );
+      setOverrideReason("");
+      setShowActivityOverride(false);
+    },
+    []
+  );
 
   const statusColors = {
     "in-progress": "text-blue-600 bg-blue-50",
@@ -524,6 +850,18 @@ export default function Home() {
               >
                 Machines
               </button>
+              <button
+                onClick={() => {
+                  setViewMode("activity");
+                  setHasNewActivity(false);
+                }}
+                className={`flex-1 text-xs font-semibold py-1.5 rounded-md transition-colors relative ${viewMode === "activity" ? "bg-white shadow-sm text-gray-900" : "text-gray-500 hover:text-gray-700"}`}
+              >
+                Activity
+                {hasNewActivity && viewMode !== "activity" && (
+                  <span className="absolute top-1 right-1 w-1.5 h-1.5 bg-blue-500 rounded-full" />
+                )}
+              </button>
             </div>
           </div>
 
@@ -538,6 +876,7 @@ export default function Home() {
                       setActiveDisruption(null);
                       setProposal(null);
                       setActionMode(null);
+                      setWhyExpanded(false);
                     }}
                     className={`w-full text-left p-3 rounded-lg transition-colors ${
                       selectedOrderId === order.id
@@ -577,7 +916,7 @@ export default function Home() {
                 </button>
               </div>
             </>
-          ) : (
+          ) : viewMode === "machines" ? (
             <>
               <div className="flex-1 overflow-y-auto p-2 space-y-1">
                 {machines.map((machine) => {
@@ -631,6 +970,51 @@ export default function Home() {
                 </button>
               </div>
             </>
+          ) : (
+            // Activity list
+            <div className="flex-1 overflow-y-auto p-2">
+              {groupActivityByDay(activityLog).map(({ day, entries }) => (
+                <div key={day} className="mb-2">
+                  <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider px-2 py-1.5">
+                    {day}
+                  </div>
+                  {entries.map((entry) => (
+                    <button
+                      key={entry.id}
+                      onClick={() => {
+                        setSelectedActivityId(entry.id);
+                        setShowActivityOverride(false);
+                        setOverrideReason("");
+                      }}
+                      className={`w-full text-left p-2.5 rounded-lg transition-colors mb-0.5 ${
+                        selectedActivityId === entry.id
+                          ? "bg-gray-100 ring-1 ring-gray-300"
+                          : "hover:bg-gray-50"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-1 mb-0.5">
+                        <span className="text-[10px] text-gray-400 font-mono shrink-0">
+                          {formatActivityTime(entry.timestamp)}
+                        </span>
+                        <ActivityStatusPill status={entry.status} />
+                      </div>
+                      <p className="text-xs font-semibold text-gray-800 truncate leading-snug">
+                        {entry.title}
+                      </p>
+                      {(entry.affectedOrder || entry.affectedOperation) && (
+                        <p className="text-[10px] text-gray-500 mt-0.5 truncate">
+                          {entry.affectedOrder && (
+                            <span className="font-mono">{entry.affectedOrder}</span>
+                          )}
+                          {entry.affectedOrder && entry.affectedOperation && " · "}
+                          {entry.affectedOperation}
+                        </p>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </div>
           )}
         </aside>
 
@@ -658,18 +1042,69 @@ export default function Home() {
                   </div>
                   <div className="text-right">
                     <p className="text-xs text-gray-500 uppercase tracking-wide">
-                      Promised delivery
+                      Promised delivery (contract)
                     </p>
                     <p className="text-lg font-bold">
                       {formatDate(selectedOrder.promisedDate)}
                     </p>
-                    <div className="mt-1 w-40">
-                      <ConfidenceBar
-                        pct={selectedOrder.currentConfidence}
-                      />
-                    </div>
+
+                    {selectedConf?.modelEstimateDate && (
+                      <div
+                        className={`mt-3 pt-3 border-t border-gray-100 ${animatingOrders.has(selectedOrder.id) ? "confidence-flash" : ""}`}
+                      >
+                        <div className="flex items-center justify-end gap-1.5 mb-0.5">
+                          <p className="text-xs text-gray-500 uppercase tracking-wide">
+                            Model estimate
+                          </p>
+                          <Badge type="ai" />
+                        </div>
+                        <div className="flex items-baseline justify-end gap-1.5 flex-wrap">
+                          <p className="text-base font-semibold text-blue-700">
+                            {formatDate(selectedConf.modelEstimateDate)}
+                          </p>
+                          <span className="text-xs text-gray-400">
+                            ± {selectedConf.uncertaintyDays}d
+                          </span>
+                          {confLateDays > 0 && (
+                            <span className="text-[11px] font-bold text-red-600">
+                              ↑ {confLateDays}d late
+                            </span>
+                          )}
+                          {confLateDays < 0 && (
+                            <span className="text-[11px] font-bold text-emerald-600">
+                              ↓ {Math.abs(confLateDays)}d early
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center justify-end gap-1.5 mt-0.5">
+                          <span
+                            className={`w-1.5 h-1.5 rounded-full ${selectedConf.confidencePercent >= 85 ? "bg-emerald-500" : selectedConf.confidencePercent >= 60 ? "bg-amber-500" : "bg-red-500"}`}
+                          />
+                          <span className="text-xs text-gray-600">
+                            Confidence: {selectedConf.confidencePercent}%
+                          </span>
+                        </div>
+                        {(selectedConf.confidencePercent < 60 ||
+                          confLateDays > 0) && (
+                          <div className="mt-1 flex justify-end">
+                            <span className="text-[10px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-medium">
+                              Review with planner
+                            </span>
+                          </div>
+                        )}
+                        <button
+                          onClick={() => setWhyExpanded(!whyExpanded)}
+                          className="text-xs text-blue-600 hover:text-blue-800 mt-1.5 flex items-center gap-1 ml-auto"
+                        >
+                          {whyExpanded ? "▲" : "▼"} Why this estimate
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
+                {whyExpanded && selectedConf?.modelEstimateDate && (
+                  <WhyEstimatePanel confidence={selectedConf} />
+                )}
               </div>
 
               {/* Operations timeline */}
@@ -975,7 +1410,7 @@ export default function Home() {
                 </div>
               )}
             </>
-          ) : (
+          ) : viewMode === "machines" ? (
             // ─── MACHINE VIEW ───
             <>
               {/* Machine header / capacity summary */}
@@ -1498,6 +1933,236 @@ export default function Home() {
                   </span>
                 </div>
               </div>
+            </>
+          ) : (
+            // ─── ACTIVITY VIEW ───
+            <>
+              {selectedActivity ? (
+                <div className="bg-white rounded-xl border border-gray-200 p-5">
+                  {/* Header */}
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="flex-1 min-w-0 pr-4">
+                      <h2 className="text-lg font-bold leading-snug">
+                        {selectedActivity.title}
+                      </h2>
+                      <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                        <ActivityStatusPill status={selectedActivity.status} />
+                        <span className="text-xs text-gray-400">
+                          {selectedActivity.status === "auto_applied"
+                            ? "Applied automatically"
+                            : "Proposed by Avion Agent"}{" "}
+                          at {formatActivityTime(selectedActivity.timestamp)}
+                          {selectedActivity.decision && (
+                            <>
+                              {" · "}
+                              {selectedActivity.decision.action === "approved"
+                                ? "Approved"
+                                : "Overridden"}{" "}
+                              by {selectedActivity.decision.by} at{" "}
+                              {formatActivityTime(selectedActivity.decision.at)}
+                            </>
+                          )}
+                          {selectedActivity.status === "pending" && (
+                            <> · Awaiting {currentUser.name}</>
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                    <Badge type="ai" />
+                  </div>
+
+                  {/* Trigger */}
+                  <div className="mb-5">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5">
+                      Trigger
+                    </h3>
+                    <p className="text-sm text-gray-700">
+                      {selectedActivity.trigger}
+                    </p>
+                  </div>
+
+                  {/* Reasoning */}
+                  {selectedActivity.reasoning.length > 0 && (
+                    <div className="mb-5">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5">
+                        Reasoning <Badge type="ai" />
+                      </h3>
+                      <ol className="space-y-1.5">
+                        {selectedActivity.reasoning.map((step, i) => (
+                          <li
+                            key={i}
+                            className="text-sm text-gray-700 flex gap-2"
+                          >
+                            <span className="text-gray-400 shrink-0 font-mono text-xs mt-0.5">
+                              {i + 1}.
+                            </span>
+                            {step}
+                          </li>
+                        ))}
+                      </ol>
+                    </div>
+                  )}
+
+                  {/* Alternatives considered */}
+                  {selectedActivity.alternatives.length > 0 && (
+                    <div className="mb-5">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-gray-500 mb-2">
+                        Alternatives considered <Badge type="ai" />
+                      </h3>
+                      <table className="w-full text-xs border-collapse">
+                        <thead>
+                          <tr className="border-b border-gray-100">
+                            <th className="text-left py-1.5 pr-3 text-gray-400 font-medium">
+                              Option
+                            </th>
+                            <th className="text-right py-1.5 px-2 text-gray-400 font-medium whitespace-nowrap">
+                              Delivery impact
+                            </th>
+                            <th className="text-right py-1.5 px-2 text-gray-400 font-medium whitespace-nowrap">
+                              Cost impact
+                            </th>
+                            <th className="text-center py-1.5 pl-2 text-gray-400 font-medium">
+                              Picked
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selectedActivity.alternatives.map((alt, i) => (
+                            <tr
+                              key={i}
+                              className={`border-b border-gray-50 ${alt.picked ? "bg-emerald-50" : ""}`}
+                            >
+                              <td className="py-1.5 pr-3 text-gray-700">
+                                {alt.description}
+                              </td>
+                              <td className="py-1.5 px-2 text-right text-gray-600">
+                                {alt.deliveryImpactDays === 0
+                                  ? "0 days"
+                                  : `${alt.deliveryImpactDays > 0 ? "+" : ""}${alt.deliveryImpactDays} days`}
+                              </td>
+                              <td className="py-1.5 px-2 text-right text-gray-600">
+                                {alt.costImpactDollars === 0
+                                  ? "$0"
+                                  : alt.costImpactDollars > 0
+                                    ? `+$${alt.costImpactDollars.toLocaleString()}`
+                                    : `-$${Math.abs(alt.costImpactDollars).toLocaleString()}`}
+                              </td>
+                              <td className="py-1.5 pl-2 text-center">
+                                {alt.picked && (
+                                  <span className="text-emerald-600 font-bold">
+                                    ✓
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {/* Data sources */}
+                  <div className="mb-5">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-gray-500 mb-1.5">
+                      Data sources used
+                    </h3>
+                    <ul className="space-y-0.5">
+                      {selectedActivity.dataSources.map((source, i) => (
+                        <li key={i} className="text-xs text-gray-500">
+                          • {source}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  {/* Action buttons — PENDING only */}
+                  {selectedActivity.status === "pending" &&
+                    !showActivityOverride && (
+                      <div className="flex gap-2 pt-4 border-t border-gray-100">
+                        <button
+                          onClick={() =>
+                            handleActivityApprove(selectedActivity.id)
+                          }
+                          className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium py-2.5 rounded-lg transition-colors"
+                        >
+                          Approve and apply
+                        </button>
+                        <button
+                          onClick={() => setShowActivityOverride(true)}
+                          className="px-5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium py-2.5 rounded-lg transition-colors"
+                        >
+                          Override
+                        </button>
+                      </div>
+                    )}
+
+                  {/* Override reason input */}
+                  {selectedActivity.status === "pending" &&
+                    showActivityOverride && (
+                      <div className="pt-4 border-t border-gray-100">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Badge type="human" />
+                          <span className="text-sm font-medium">
+                            Reason for override:
+                          </span>
+                        </div>
+                        <textarea
+                          value={overrideReason}
+                          onChange={(e) => setOverrideReason(e.target.value)}
+                          placeholder="Enter override reason (required)..."
+                          rows={2}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 resize-none"
+                        />
+                        <div className="flex gap-2 mt-2">
+                          <button
+                            onClick={() => {
+                              setShowActivityOverride(false);
+                              setOverrideReason("");
+                            }}
+                            className="text-sm text-gray-500 hover:text-gray-700 px-3 py-1.5"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            disabled={overrideReason.trim().length < 5}
+                            onClick={() =>
+                              handleActivityOverride(
+                                selectedActivity.id,
+                                overrideReason
+                              )
+                            }
+                            className="bg-gray-900 text-white text-sm font-medium px-4 py-1.5 rounded-lg disabled:opacity-30 disabled:cursor-not-allowed hover:bg-gray-800 transition-colors"
+                          >
+                            Submit override
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                  {/* Decision record */}
+                  {selectedActivity.decision && (
+                    <div className="mt-3 pt-3 border-t border-gray-100">
+                      <p className="text-xs text-gray-500">
+                        {selectedActivity.decision.action === "approved"
+                          ? "Approved"
+                          : "Overridden"}{" "}
+                        by{" "}
+                        <strong>{selectedActivity.decision.by}</strong> at{" "}
+                        {formatActivityTime(selectedActivity.decision.at)}
+                        {selectedActivity.decision.reason && (
+                          <> — {selectedActivity.decision.reason}</>
+                        )}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="bg-gray-100 border border-dashed border-gray-300 rounded-xl p-8 text-center">
+                  <p className="text-gray-400 text-sm">
+                    No activity selected.
+                  </p>
+                </div>
+              )}
             </>
           )}
         </main>

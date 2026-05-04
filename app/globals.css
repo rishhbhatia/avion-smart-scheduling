@@ -17,3 +17,15 @@ body {
   color: var(--foreground);
   font-family: var(--font-sans), Arial, Helvetica, sans-serif;
 }
+
+@keyframes confidence-flash {
+  0% { background-color: transparent; }
+  15% { background-color: #fef3c7; }
+  75% { background-color: #fef3c7; }
+  100% { background-color: transparent; }
+}
+
+.confidence-flash {
+  animation: confidence-flash 1.8s ease-out;
+  border-radius: 6px;
+}
